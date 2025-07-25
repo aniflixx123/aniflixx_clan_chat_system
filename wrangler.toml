@@ -1,0 +1,34 @@
+name = "clan-chat"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+
+[env.production.vars]
+ENVIRONMENT = "production"
+BACKEND_URL = "https://aniflixx-backend.onrender.com"
+MAX_MESSAGE_LENGTH = "2000"
+MAX_FILE_SIZE = "25000000"
+
+[[env.production.durable_objects.bindings]]
+name = "CHAT_ROOMS"
+class_name = "ChatRoom"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatRoom"]
+
+[[env.production.kv_namespaces]]
+binding = "CHANNEL_CACHE"
+id = "ae1debbc1ad342b384b6e81d102fd665"
+preview_id = "ae1debbc1ad342b384b6e81d102fd665"
+
+[[env.production.r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "clan-chat-attachments"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "clan-chat-db"
+database_id = "d3225a3e-0609-4fc1-a23d-ffd5cab2abe0"
