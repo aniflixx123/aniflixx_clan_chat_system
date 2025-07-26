@@ -36,32 +36,37 @@ export class ChatRoom {
         this.messages = storedMessages;
       } else if (this.channelId) {
         // Load from D1 database
-        const { results } = await env.DB.prepare(
-          `SELECT * FROM messages WHERE channelId = ? ORDER BY timestamp DESC LIMIT 50`
-        ).bind(this.channelId).all();
+        try {
+          const { results } = await env.DB.prepare(
+            `SELECT * FROM messages WHERE channelId = ? AND deleted = 0 ORDER BY timestamp DESC LIMIT 50`
+          ).bind(this.channelId).all();
 
-        this.messages = (results.reverse() as Record<string, unknown>[]).map((r) => ({
-          id: String(r.id),
-          channelId: String(r.channelId),
-          userId: String(r.userId),
-          content: String(r.content),
-          timestamp: String(r.timestamp),
-          edited: !!r.edited,
-          editedAt: r.editedAt ? String(r.editedAt) : undefined,
-          deleted: !!r.deleted,
-          threadId: r.threadId ? String(r.threadId) : undefined,
-          replyTo: r.replyTo ? String(r.replyTo) : undefined,
-          attachments: [],
-          reactions: {},
-          user: {
-            uid: String(r.userId),
-            username: String(r.username || 'User'),
-            profileImage: String(r.profileImage || '')
-          },
-          mentions: []
-        }));
+          this.messages = (results.reverse() as Record<string, unknown>[]).map((r) => ({
+            id: String(r.id),
+            channelId: String(r.channelId),
+            userId: String(r.userId),
+            content: String(r.content),
+            timestamp: String(r.timestamp),
+            edited: !!r.edited,
+            editedAt: r.editedAt ? String(r.editedAt) : undefined,
+            deleted: false,
+            threadId: r.threadId ? String(r.threadId) : undefined,
+            replyTo: r.replyTo ? String(r.replyTo) : undefined,
+            attachments: [],
+            reactions: {},
+            user: {
+              uid: String(r.userId),
+              username: String(r.username || 'User'),
+              profileImage: String(r.profileImage || '')
+            },
+            mentions: []
+          }));
 
-        await state.storage.put('messages', this.messages);
+          await state.storage.put('messages', this.messages);
+        } catch (error) {
+          console.error('Error loading messages from D1:', error);
+          this.messages = [];
+        }
       }
     });
   }
@@ -74,6 +79,16 @@ export class ChatRoom {
       const body = await request.json() as { channelId: string };
       await this.setChannelId(body.channelId);
       return new Response('OK');
+    }
+    if (url.pathname === '/debug') {
+      return new Response(JSON.stringify({
+        channelId: this.channelId,
+        messagesInMemory: this.messages.length,
+        connectedUsers: this.sessions.size,
+        members: Array.from(this.members.keys())
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
     return new Response('Not found', { status: 404 });
   }
@@ -117,49 +132,55 @@ export class ChatRoom {
     const limit = parseInt(url.searchParams.get('limit') || '50');
     const before = url.searchParams.get('before');
 
-    let query = `SELECT m.*, u.username, u.profileImage 
-                 FROM messages m 
-                 LEFT JOIN users u ON m.userId = u.userId 
-                 WHERE m.channelId = ?`;
+    // First try to get from D1, then fall back to simpler query
+    let query = `SELECT * FROM messages WHERE channelId = ? AND deleted = 0`;
     const params: any[] = [this.channelId];
 
     if (before) {
-      query += ` AND m.timestamp < ?`;
+      query += ` AND timestamp < ?`;
       params.push(before);
     }
 
-    query += ` ORDER BY m.timestamp DESC LIMIT ?`;
+    query += ` ORDER BY timestamp DESC LIMIT ?`;
     params.push(limit);
 
-    const { results } = await this.env.DB.prepare(query).bind(...params).all();
+    try {
+      const { results } = await this.env.DB.prepare(query).bind(...params).all();
 
-    const messages: Message[] = (results.reverse() as Record<string, unknown>[]).map((r) => {
-      const member = this.members.get(String(r.userId));
-      return {
-        id: String(r.id),
-        channelId: String(r.channelId),
-        userId: String(r.userId),
-        content: String(r.content),
-        timestamp: String(r.timestamp),
-        edited: !!r.edited,
-        editedAt: r.editedAt ? String(r.editedAt) : undefined,
-        deleted: !!r.deleted,
-        threadId: r.threadId ? String(r.threadId) : undefined,
-        replyTo: r.replyTo ? String(r.replyTo) : undefined,
-        attachments: [],
-        reactions: {},
-        user: {
-          uid: String(r.userId),
-          username: String(r.username || member?.username || 'User'),
-          profileImage: String(r.profileImage || member?.avatar || '')
-        },
-        mentions: []
-      };
-    });
+      const messages: Message[] = (results.reverse() as Record<string, unknown>[]).map((r) => {
+        const member = this.members.get(String(r.userId));
+        return {
+          id: String(r.id),
+          channelId: String(r.channelId),
+          userId: String(r.userId),
+          content: String(r.content),
+          timestamp: String(r.timestamp),
+          edited: !!r.edited,
+          editedAt: r.editedAt ? String(r.editedAt) : undefined,
+          deleted: !!r.deleted,
+          threadId: r.threadId ? String(r.threadId) : undefined,
+          replyTo: r.replyTo ? String(r.replyTo) : undefined,
+          attachments: [],
+          reactions: {},
+          user: {
+            uid: String(r.userId),
+            username: String(r.username || member?.username || 'User'),
+            profileImage: String(r.profileImage || member?.avatar || '')
+          },
+          mentions: []
+        };
+      });
 
-    return new Response(JSON.stringify({ messages }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
+      return new Response(JSON.stringify({ messages }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+      // Return empty messages array on error
+      return new Response(JSON.stringify({ messages: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
   }
 
   async setChannelId(channelId: string): Promise<void> {

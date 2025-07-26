@@ -3,12 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Durable Objects binding - MUST be outside env blocks
-[[durable_objects.bindings]]
-name = "CHAT_ROOMS"
-class_name = "ChatRoom"
-
-# Migrations - also outside env blocks
+# Migrations at the top level
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
@@ -16,6 +11,11 @@ new_sqlite_classes = ["ChatRoom"]
 # Production environment configuration
 [env.production]
 vars = { ENVIRONMENT = "production", MAX_MESSAGE_LENGTH = "2000", MAX_FILE_SIZE = "25000000" }
+
+# IMPORTANT: Durable Objects binding MUST be under env.production
+[[env.production.durable_objects.bindings]]
+name = "CHAT_ROOMS"
+class_name = "ChatRoom"
 
 [[env.production.kv_namespaces]]
 binding = "CHANNEL_CACHE"
@@ -30,9 +30,13 @@ binding = "DB"
 database_name = "clan-chat-db"
 database_id = "d3225a3e-0609-4fc1-a23d-ffd5cab2abe0"
 
-# Development environment configuration
+# Development environment configuration (optional)
 [env.development]
 vars = { ENVIRONMENT = "development", MAX_MESSAGE_LENGTH = "2000", MAX_FILE_SIZE = "25000000" }
+
+[[env.development.durable_objects.bindings]]
+name = "CHAT_ROOMS"
+class_name = "ChatRoom"
 
 [[env.development.kv_namespaces]]
 binding = "CHANNEL_CACHE"

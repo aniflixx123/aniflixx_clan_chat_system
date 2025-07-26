@@ -29,6 +29,35 @@ const worker = {
     }
 
     try {
+      // Debug endpoint to check database
+      if (url.pathname === '/api/debug/db-check') {
+        try {
+          const messagesCount = await env.DB.prepare(
+            'SELECT COUNT(*) as count FROM messages'
+          ).first();
+          
+          const recentMessages = await env.DB.prepare(
+            'SELECT * FROM messages ORDER BY timestamp DESC LIMIT 5'
+          ).all();
+          
+          return new Response(JSON.stringify({
+            messagesCount: messagesCount?.count || 0,
+            recentMessages: recentMessages.results,
+            timestamp: new Date().toISOString()
+          }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        } catch (error: any) {
+          return new Response(JSON.stringify({
+            error: 'Database error',
+            message: error.message
+          }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
       // Route: /api/channels/:channelId/websocket
       const channelMatch = url.pathname.match(/^\/api\/channels\/([^\/]+)\/(websocket|messages)$/);
       if (channelMatch) {
