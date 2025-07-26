@@ -1,15 +1,21 @@
 {
   "name": "clan-chat-system",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Real-time chat system for clan/team communication",
+  "main": "dist/index.js",
   "scripts": {
+    "dev": "wrangler dev --env development",
+    "deploy": "wrangler deploy --env production",
+    "deploy:dev": "wrangler deploy --env development",
+    "types": "tsc --noEmit",
+    "migrate:dev": "wrangler d1 execute dev-clan-chat-db --file=./migrations/001_create_messages_table.sql --env development",
+    "migrate:prod": "wrangler d1 execute clan-chat-db --file=./migrations/001_create_messages_table.sql --env production",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["cloudflare", "workers", "durable-objects", "chat", "websocket"],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250710.0",
     "typescript": "^5.8.3",

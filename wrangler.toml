@@ -3,26 +3,23 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-[env.production]
-
-[env.production.vars]
-ENVIRONMENT = "production"
-BACKEND_URL = "https://aniflixx-backend.onrender.com"
-MAX_MESSAGE_LENGTH = "2000"
-MAX_FILE_SIZE = "25000000"
-
-[[env.production.durable_objects.bindings]]
+# Durable Objects binding - MUST be outside env blocks
+[[durable_objects.bindings]]
 name = "CHAT_ROOMS"
 class_name = "ChatRoom"
 
-[[env.production.migrations]]
+# Migrations - also outside env blocks
+[[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
+
+# Production environment configuration
+[env.production]
+vars = { ENVIRONMENT = "production", MAX_MESSAGE_LENGTH = "2000", MAX_FILE_SIZE = "25000000" }
 
 [[env.production.kv_namespaces]]
 binding = "CHANNEL_CACHE"
 id = "ae1debbc1ad342b384b6e81d102fd665"
-preview_id = "ae1debbc1ad342b384b6e81d102fd665"
 
 [[env.production.r2_buckets]]
 binding = "ATTACHMENTS"
@@ -32,3 +29,20 @@ bucket_name = "clan-chat-attachments"
 binding = "DB"
 database_name = "clan-chat-db"
 database_id = "d3225a3e-0609-4fc1-a23d-ffd5cab2abe0"
+
+# Development environment configuration
+[env.development]
+vars = { ENVIRONMENT = "development", MAX_MESSAGE_LENGTH = "2000", MAX_FILE_SIZE = "25000000" }
+
+[[env.development.kv_namespaces]]
+binding = "CHANNEL_CACHE"
+id = "dev-channel-cache"
+
+[[env.development.r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "dev-clan-chat-attachments"
+
+[[env.development.d1_databases]]
+binding = "DB"
+database_name = "dev-clan-chat-db"
+database_id = "dev-database-id"

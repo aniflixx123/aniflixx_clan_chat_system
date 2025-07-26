@@ -1,18 +1,19 @@
 // src/index.ts
 import { ChatRoom } from './durable-objects/ChatRoom';
 
+// Export the Durable Object class
 export { ChatRoom };
 
 export interface Env {
   CHAT_ROOMS: DurableObjectNamespace;
   CHANNEL_CACHE: KVNamespace;
   ATTACHMENTS: R2Bucket;
-  BACKEND_URL: string;
   MAX_MESSAGE_LENGTH: string;
   MAX_FILE_SIZE: string;
+  DB: D1Database;
 }
 
-export default {
+const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     
@@ -28,43 +29,6 @@ export default {
     }
 
     try {
-      // Debug endpoint
-      if (url.pathname === '/api/debug/test-auth') {
-        const token = url.searchParams.get('token');
-        const userId = url.searchParams.get('userId');
-        
-        console.log('Debug test auth:', { hasToken: !!token, userId });
-        
-        try {
-          const response = await fetch(`${env.BACKEND_URL}/api/hub/chat/auth/verify-token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token, userId }),
-          });
-          
-          const result = await response.json();
-          
-          return new Response(JSON.stringify({
-            backendUrl: env.BACKEND_URL,
-            requestSent: true,
-            backendStatus: response.status,
-            backendResponse: result,
-            timestamp: new Date().toISOString()
-          }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        } catch (error: any) {
-          return new Response(JSON.stringify({
-            error: error.message,
-            backendUrl: env.BACKEND_URL,
-            timestamp: new Date().toISOString()
-          }), {
-            status: 500,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        }
-      }
-
       // Route: /api/channels/:channelId/websocket
       const channelMatch = url.pathname.match(/^\/api\/channels\/([^\/]+)\/(websocket|messages)$/);
       if (channelMatch) {
@@ -89,7 +53,7 @@ export default {
           // Build the internal URL with query params
           const internalUrl = new URL('http://internal/websocket');
           
-          // Copy all query params (token, userId, etc.)
+          // Copy all query params (token, userId, username, profileImage, etc.)
           url.searchParams.forEach((value, key) => {
             internalUrl.searchParams.set(key, value);
           });
@@ -119,7 +83,7 @@ export default {
           });
         } else {
           // For non-WebSocket requests, handle normally
-          const response = await room.fetch(new Request(`http://internal/${endpoint}`, request));
+          const response = await room.fetch(new Request(`http://internal/${endpoint}${url.search}`, request));
           
           const newHeaders = new Headers(response.headers);
           Object.entries(corsHeaders).forEach(([key, value]) => {
@@ -161,7 +125,7 @@ export default {
       const channelId = formData.get('channelId');
       const userId = request.headers.get('X-User-Id');
 
-      // Fix: Properly check if file is a File object
+      // Check if file is a File object
       if (!file || typeof file === 'string') {
         return new Response('No file provided', { 
           status: 400, 
@@ -263,3 +227,5 @@ export default {
     }
   },
 };
+
+export default worker;

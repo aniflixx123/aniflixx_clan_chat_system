@@ -1,18 +1,18 @@
-// durable-objects/ChatRoom.ts
+// src/durable-objects/ChatRoom.ts
 import { Message, ChannelMember, WSMessage } from '../types';
-import { DurableObject } from "cloudflare:workers";
 
 export interface Env {
   CHAT_ROOMS: DurableObjectNamespace;
   CHANNEL_CACHE: KVNamespace;
   ATTACHMENTS: R2Bucket;
-  BACKEND_URL: string;
   MAX_MESSAGE_LENGTH: string;
   MAX_FILE_SIZE: string;
   DB: D1Database;
 }
 
-export class ChatRoom extends DurableObject<Env> {
+export class ChatRoom {
+  private state: DurableObjectState;
+  private env: Env;
   private sessions: Map<string, WebSocket> = new Map();
   private members: Map<string, ChannelMember> = new Map();
   private messages: Message[] = [];
@@ -20,43 +20,48 @@ export class ChatRoom extends DurableObject<Env> {
   private channelId: string = '';
   private typingTimeouts: Map<string, number> = new Map();
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state;
+    this.env = env;
 
-    ctx.blockConcurrencyWhile(async () => {
-      const storedMessages = await ctx.storage.get<Message[]>('messages');
-      const storedChannelId = await ctx.storage.get<string>('channelId');
+    state.blockConcurrencyWhile(async () => {
+      const storedMessages = await state.storage.get<Message[]>('messages');
+      const storedChannelId = await state.storage.get<string>('channelId');
+      const storedMembers = await state.storage.get<Map<string, ChannelMember>>('members');
 
       if (storedChannelId) this.channelId = storedChannelId;
+      if (storedMembers) this.members = new Map(storedMembers);
 
       if (storedMessages?.length) {
         this.messages = storedMessages;
       } else if (this.channelId) {
+        // Load from D1 database
         const { results } = await env.DB.prepare(
           `SELECT * FROM messages WHERE channelId = ? ORDER BY timestamp DESC LIMIT 50`
         ).bind(this.channelId).all();
 
-        const enriched = await Promise.all((results.reverse() as Record<string, unknown>[]).map(async (r) => {
-          const userInfo = await this.getUserInfo(String(r.userId));
-          return {
-            id: String(r.id),
-            channelId: String(r.channelId),
-            userId: String(r.userId),
-            content: String(r.content),
-            timestamp: String(r.timestamp),
-            edited: !!r.edited,
-            editedAt: r.editedAt ? String(r.editedAt) : undefined,
-            deleted: !!r.deleted,
-            threadId: r.threadId ? String(r.threadId) : undefined,
-            replyTo: r.replyTo ? String(r.replyTo) : undefined,
-            attachments: [],
-            reactions: {},
-            user: userInfo
-          };
+        this.messages = (results.reverse() as Record<string, unknown>[]).map((r) => ({
+          id: String(r.id),
+          channelId: String(r.channelId),
+          userId: String(r.userId),
+          content: String(r.content),
+          timestamp: String(r.timestamp),
+          edited: !!r.edited,
+          editedAt: r.editedAt ? String(r.editedAt) : undefined,
+          deleted: !!r.deleted,
+          threadId: r.threadId ? String(r.threadId) : undefined,
+          replyTo: r.replyTo ? String(r.replyTo) : undefined,
+          attachments: [],
+          reactions: {},
+          user: {
+            uid: String(r.userId),
+            username: String(r.username || 'User'),
+            profileImage: String(r.profileImage || '')
+          },
+          mentions: []
         }));
 
-        this.messages = enriched;
-        await ctx.storage.put('messages', this.messages);
+        await state.storage.put('messages', this.messages);
       }
     });
   }
@@ -73,37 +78,32 @@ export class ChatRoom extends DurableObject<Env> {
     return new Response('Not found', { status: 404 });
   }
 
-  private async getUserInfo(userId: string): Promise<{ username: string; avatar: string | null }> {
-    try {
-      const cached = this.members.get(userId);
-      if (cached) return { username: cached.username, avatar: cached.avatar || null };
-
-      const res = await fetch(`${this.env.BACKEND_URL}/api/hub/chat/users/${userId}`);
-      if (!res.ok) throw new Error('Failed to fetch');
-      const userInfo = await res.json() as { username: string; avatar: string | null };
-      
-      // Cache the user info
-      this.members.set(userId, {
-        id: userId,
-        username: userInfo.username,
-        avatar: userInfo.avatar,
-        status: 'online'
-      });
-      
-      return userInfo;
-    } catch {
-      return { username: 'Unknown', avatar: null };
-    }
-  }
-
   private async handleWebSocket(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const token = url.searchParams.get('token');
     const userId = url.searchParams.get('userId');
+    const username = url.searchParams.get('username') || 'User';
+    const profileImage = url.searchParams.get('profileImage') || '';
 
-    if (!token || !userId || !(await this.verifyToken(token, userId))) {
+    console.log('🔐 WebSocket connection attempt:', { userId, username });
+
+    if (!userId) {
+      console.error('❌ Missing userId');
       return new Response('Unauthorized', { status: 401 });
     }
+
+    // Store user info
+    if (!this.members.has(userId)) {
+      this.members.set(userId, {
+        id: userId,
+        username: decodeURIComponent(username),
+        avatar: decodeURIComponent(profileImage),
+        status: 'online'
+      });
+      await this.state.storage.put('members', Array.from(this.members.entries()));
+    }
+
+    console.log('✅ User authenticated, creating WebSocket');
 
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
@@ -112,41 +112,29 @@ export class ChatRoom extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async verifyToken(token: string, userId: string): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.env.BACKEND_URL}/api/hub/chat/auth/verify-token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, userId }),
-      });
-      if (!res.ok) return false;
-      const result = await res.json() as { valid: boolean };
-      return result.valid;
-    } catch {
-      return false;
-    }
-  }
-
   async getMessages(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const limit = parseInt(url.searchParams.get('limit') || '50');
     const before = url.searchParams.get('before');
 
-    let query = `SELECT * FROM messages WHERE channelId = ?`;
+    let query = `SELECT m.*, u.username, u.profileImage 
+                 FROM messages m 
+                 LEFT JOIN users u ON m.userId = u.userId 
+                 WHERE m.channelId = ?`;
     const params: any[] = [this.channelId];
 
     if (before) {
-      query += ` AND timestamp < ?`;
+      query += ` AND m.timestamp < ?`;
       params.push(before);
     }
 
-    query += ` ORDER BY timestamp DESC LIMIT ?`;
+    query += ` ORDER BY m.timestamp DESC LIMIT ?`;
     params.push(limit);
 
     const { results } = await this.env.DB.prepare(query).bind(...params).all();
 
-    const messages: Message[] = await Promise.all((results.reverse() as Record<string, unknown>[]).map(async (r) => {
-      const userInfo = await this.getUserInfo(String(r.userId));
+    const messages: Message[] = (results.reverse() as Record<string, unknown>[]).map((r) => {
+      const member = this.members.get(String(r.userId));
       return {
         id: String(r.id),
         channelId: String(r.channelId),
@@ -160,9 +148,14 @@ export class ChatRoom extends DurableObject<Env> {
         replyTo: r.replyTo ? String(r.replyTo) : undefined,
         attachments: [],
         reactions: {},
-        user: userInfo
+        user: {
+          uid: String(r.userId),
+          username: String(r.username || member?.username || 'User'),
+          profileImage: String(r.profileImage || member?.avatar || '')
+        },
+        mentions: []
       };
-    }));
+    });
 
     return new Response(JSON.stringify({ messages }), {
       headers: { 'Content-Type': 'application/json' },
@@ -171,28 +164,51 @@ export class ChatRoom extends DurableObject<Env> {
 
   async setChannelId(channelId: string): Promise<void> {
     this.channelId = channelId;
-    await this.ctx.storage.put('channelId', channelId);
+    await this.state.storage.put('channelId', channelId);
   }
 
   private handleSession(webSocket: WebSocket, userId: string) {
+    console.log('👤 New session for user:', userId);
     this.sessions.set(userId, webSocket);
 
-    // Send current online users to the new user
+    const member = this.members.get(userId);
+
+    // Send initial messages to the new user
+    this.sendToUser(userId, {
+      type: 'init',
+      messages: this.messages
+    });
+
+    // Send current online users
+    const onlineUsers = Array.from(this.sessions.keys()).map(uid => {
+      const m = this.members.get(uid);
+      return {
+        uid,
+        username: m?.username || 'User',
+        profileImage: m?.avatar || ''
+      };
+    });
+    
     this.sendToUser(userId, {
       type: 'user_list',
-      users: Array.from(this.members.values()).filter(member => this.sessions.has(member.id))
+      users: onlineUsers
     });
 
     // Notify other users about new user joining
     this.broadcast({
       type: 'user_joined',
-      user: this.members.get(userId) || { id: userId, username: 'Unknown', avatar: null, status: 'online' }
+      user: {
+        uid: userId,
+        username: member?.username || 'User',
+        profileImage: member?.avatar || ''
+      }
     }, userId);
 
     webSocket.addEventListener('message', async (event) => {
       try {
         const messageData = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
         const message = JSON.parse(messageData) as WSMessage;
+        console.log('📨 Received message:', message.type);
         await this.handleMessage(message, userId);
       } catch (error) {
         console.error('Error handling message:', error);
@@ -204,6 +220,7 @@ export class ChatRoom extends DurableObject<Env> {
     });
 
     webSocket.addEventListener('close', () => {
+      console.log('👋 User disconnected:', userId);
       this.handleDisconnect(userId);
     });
 
@@ -236,7 +253,12 @@ export class ChatRoom extends DurableObject<Env> {
       case 'reaction_remove':
         await this.handleReactionRemove(message, userId);
         break;
+      case 'ping':
+        // Respond to heartbeat
+        this.sendToUser(userId, { type: 'pong' });
+        break;
       default:
+        console.warn('Unknown message type:', message.type);
         this.sendToUser(userId, {
           type: 'error',
           message: 'Unknown message type'
@@ -256,7 +278,7 @@ export class ChatRoom extends DurableObject<Env> {
 
     const messageId = crypto.randomUUID();
     const timestamp = new Date().toISOString();
-    const userInfo = await this.getUserInfo(userId);
+    const member = this.members.get(userId);
 
     const newMessage: Message = {
       id: messageId,
@@ -270,14 +292,19 @@ export class ChatRoom extends DurableObject<Env> {
       replyTo: message.replyTo,
       attachments: message.attachments || [],
       reactions: {},
-      user: userInfo
+      user: {
+        uid: userId,
+        username: member?.username || 'User',
+        profileImage: member?.avatar || ''
+      },
+      mentions: message.mentions || []
     };
 
-    // Save to database
+    // Save to database with user info
     try {
       await this.env.DB.prepare(
-        `INSERT INTO messages (id, channelId, userId, content, timestamp, threadId, replyTo) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO messages (id, channelId, userId, content, timestamp, threadId, replyTo, username, profileImage) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         messageId,
         this.channelId,
@@ -285,17 +312,19 @@ export class ChatRoom extends DurableObject<Env> {
         content,
         timestamp,
         message.threadId || null,
-        message.replyTo || null
+        message.replyTo || null,
+        member?.username || 'User',
+        member?.avatar || ''
       ).run();
 
       // Add to in-memory cache
       this.messages.push(newMessage);
       if (this.messages.length > 100) {
-        this.messages = this.messages.slice(-100);
+        this.messages = this.messages.slice(-50);
       }
 
       // Update storage
-      await this.ctx.storage.put('messages', this.messages);
+      await this.state.storage.put('messages', this.messages);
 
       // Broadcast to all connected users
       this.broadcast({
@@ -342,15 +371,15 @@ export class ChatRoom extends DurableObject<Env> {
     try {
       // Update database
       await this.env.DB.prepare(
-        `UPDATE messages SET content = ?, edited = true, editedAt = ? WHERE id = ?`
-      ).bind(newContent, editedAt, messageId).run();
+        `UPDATE messages SET content = ?, edited = 1, editedAt = ? WHERE id = ? AND userId = ?`
+      ).bind(newContent, editedAt, messageId, userId).run();
 
       // Update cache
       this.messages[messageIndex].content = newContent;
       this.messages[messageIndex].edited = true;
       this.messages[messageIndex].editedAt = editedAt;
 
-      await this.ctx.storage.put('messages', this.messages);
+      await this.state.storage.put('messages', this.messages);
 
       // Broadcast edit
       this.broadcast({
@@ -388,14 +417,14 @@ export class ChatRoom extends DurableObject<Env> {
     }
 
     try {
-      // Update database
+      // Update database - soft delete
       await this.env.DB.prepare(
-        `UPDATE messages SET deleted = true WHERE id = ?`
-      ).bind(messageId).run();
+        `UPDATE messages SET deleted = 1 WHERE id = ? AND userId = ?`
+      ).bind(messageId, userId).run();
 
-      // Update cache
-      this.messages[messageIndex].deleted = true;
-      await this.ctx.storage.put('messages', this.messages);
+      // Remove from cache
+      this.messages.splice(messageIndex, 1);
+      await this.state.storage.put('messages', this.messages);
 
       // Broadcast deletion
       this.broadcast({
@@ -426,7 +455,7 @@ export class ChatRoom extends DurableObject<Env> {
     // Set new timeout
     const timeout = setTimeout(() => {
       this.handleTypingStop(userId);
-    }, 5000) as unknown as number;
+    }, 3000) as unknown as number;
     
     this.typingTimeouts.set(userId, timeout);
 
@@ -470,7 +499,7 @@ export class ChatRoom extends DurableObject<Env> {
 
     if (!msg.reactions[reaction].includes(userId)) {
       msg.reactions[reaction].push(userId);
-      await this.ctx.storage.put('messages', this.messages);
+      await this.state.storage.put('messages', this.messages);
 
       this.broadcast({
         type: 'reaction_added',
@@ -494,7 +523,7 @@ export class ChatRoom extends DurableObject<Env> {
       if (msg.reactions[reaction].length === 0) {
         delete msg.reactions[reaction];
       }
-      await this.ctx.storage.put('messages', this.messages);
+      await this.state.storage.put('messages', this.messages);
 
       this.broadcast({
         type: 'reaction_removed',
@@ -544,3 +573,5 @@ export class ChatRoom extends DurableObject<Env> {
     }
   }
 }
+
+export default ChatRoom;
