@@ -193,6 +193,20 @@ export class ChatRoom {
     this.sessions.set(userId, webSocket);
 
     const member = this.members.get(userId);
+    
+    // Set up ping interval for this connection
+    const pingInterval = setInterval(() => {
+      if (webSocket.readyState === WebSocket.READY_STATE_OPEN) {
+        try {
+          webSocket.send(JSON.stringify({ type: 'ping' }));
+        } catch (error) {
+          console.error('Failed to send ping to', userId);
+          clearInterval(pingInterval);
+        }
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 30000);
 
     // Send initial messages to the new user
     this.sendToUser(userId, {
@@ -229,7 +243,7 @@ export class ChatRoom {
       try {
         const messageData = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
         const message = JSON.parse(messageData) as WSMessage;
-        console.log('📨 Received message:', message.type);
+        console.log('📨 Received message:', message.type, 'from:', userId);
         await this.handleMessage(message, userId);
       } catch (error) {
         console.error('Error handling message:', error);
@@ -242,11 +256,13 @@ export class ChatRoom {
 
     webSocket.addEventListener('close', () => {
       console.log('👋 User disconnected:', userId);
+      clearInterval(pingInterval);
       this.handleDisconnect(userId);
     });
 
     webSocket.addEventListener('error', (error) => {
       console.error('WebSocket error:', error);
+      clearInterval(pingInterval);
       this.handleDisconnect(userId);
     });
   }
@@ -568,18 +584,26 @@ export class ChatRoom {
 
   private broadcast(message: any, excludeUserId?: string): void {
     const messageStr = JSON.stringify(message);
+    console.log(`📡 Broadcasting ${message.type} to ${this.sessions.size} users (excluding: ${excludeUserId})`);
+    
+    let successCount = 0;
+    let failCount = 0;
     
     this.sessions.forEach((ws, userId) => {
       if (userId !== excludeUserId && ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
           ws.send(messageStr);
+          successCount++;
         } catch (error) {
           console.error('Error sending message to user:', userId, error);
+          failCount++;
           // Clean up broken connection
           this.sessions.delete(userId);
         }
       }
     });
+    
+    console.log(`✅ Broadcast complete: ${successCount} success, ${failCount} failed`);
   }
 
   private sendToUser(userId: string, message: any): void {
